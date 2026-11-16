@@ -110,6 +110,7 @@ pub struct Connection<C: FirebirdClient> {
     /// Default configuration for new transactions
     pub(crate) def_confs_tr: TransactionConfiguration,
     statement_cancel: Option<StatementCancelHandle>,
+    pub(crate) last_prepare_duration: std::time::Duration,
 }
 
 impl<C: FirebirdClient> Connection<C> {
@@ -132,6 +133,7 @@ impl<C: FirebirdClient> Connection<C> {
             cli,
             def_confs_tr: conf.transaction_conf,
             statement_cancel: None,
+            last_prepare_duration: std::time::Duration::ZERO,
         })
     }
 
@@ -154,6 +156,7 @@ impl<C: FirebirdClient> Connection<C> {
             cli,
             def_confs_tr: conf.transaction_conf,
             statement_cancel: None,
+            last_prepare_duration: std::time::Duration::ZERO,
         })
     }
 
@@ -623,6 +626,39 @@ where
 
 impl<C: FirebirdClient> Connection<C> {
     /// Open a query iterator and optionally return its prepared output aliases.
+    /// Prepare and cache the statement without executing it.
+    pub fn prepare_statement_type(
+        &mut self,
+        sql: &str,
+    ) -> Result<rsfbclient_core::StmtType, FbError> {
+        self.with_transaction(|tr| {
+            let data = StmtCache::get_or_prepare(tr, sql, false)?;
+            let kind = data.stmt.stmt_type;
+            StmtCache::insert_and_close(tr.conn, data)?;
+            Ok(kind)
+        })
+    }
+
+    /// Describe output field origins and aliases without executing the query.
+    pub fn describe_query_columns(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<rsfbclient_core::PreparedOutputColumn>, FbError> {
+        self.with_transaction(|tr| {
+            let mut data = StmtCache::get_or_prepare(tr, sql, false)?;
+            let result = if matches!(
+                data.stmt.stmt_type,
+                rsfbclient_core::StmtType::Select | rsfbclient_core::StmtType::SelectForUpd
+            ) {
+                tr.conn.cli.describe_output_columns(&mut data.stmt.handle)
+            } else {
+                Err("A SELECT cursor is required to describe output columns".into())
+            };
+            let cached = StmtCache::insert_and_close(tr.conn, data);
+            result.and_then(|columns| cached.map(|()| columns))
+        })
+    }
+
     pub(crate) fn query_iter_with_columns<'a, P, R>(
         &'a mut self,
         sql: &str,

@@ -90,6 +90,7 @@ where
         sql: &str,
         named_params: bool,
     ) -> Result<StmtCacheData<StatementData<C>>, FbError> {
+        tr.conn.last_prepare_duration = std::time::Duration::ZERO;
         if let Some(data) = tr.conn.stmt_cache.get(sql) {
             Ok(data)
         } else {

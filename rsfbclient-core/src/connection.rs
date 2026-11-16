@@ -110,6 +110,22 @@ pub trait FirebirdClientSqlOps {
         Vec::new()
     }
 
+    /// Exact catalog names and aliases for the prepared output, in column order.
+    fn describe_output_columns(
+        &mut self,
+        _stmt_handle: &mut Self::StmtHandle,
+    ) -> Result<Vec<PreparedOutputColumn>, FbError> {
+        Err("This client does not expose prepared output origins".into())
+    }
+
+    /// Original server input types, before any client coercion.
+    fn parameter_types(
+        &mut self,
+        _stmt_handle: &mut Self::StmtHandle,
+    ) -> Result<Vec<ParameterType>, FbError> {
+        Err("This client does not expose prepared input metadata".into())
+    }
+
     /// Encode identifiers in the attachment character set.
     fn encode_text(&self, value: &str) -> Result<Vec<u8>, FbError> {
         Ok(value.as_bytes().to_vec())
@@ -267,4 +283,19 @@ pub enum StmtType {
     SelectForUpd = 12, // isc_info_sql_stmt_select_for_upd
     SetGenerator = 13, // isc_info_sql_stmt_set_generator
     Savepoint = 14,    // isc_info_sql_stmt_savepoint
+}
+
+/// A prepared Firebird output column. Expressions can have no relation or field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedOutputColumn {
+    pub alias: String,
+    pub relation: String,
+    pub field: String,
+}
+///Responsible for actual transaction and statement execution
+#[derive(Clone, Copy, Debug)]
+pub struct ParameterType {
+    pub sql_type: u32,
+    /// Character set for character inputs; BLOB subtype for BLOB inputs.
+    pub sub_type: u16,
 }

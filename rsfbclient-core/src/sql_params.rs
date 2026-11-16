@@ -3,12 +3,12 @@ use crate::FbError;
 use std::ops::Range;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SqlParameter {
+pub struct SqlParameter {
     pub range: Range<usize>,
     pub name: Option<String>,
 }
 
-pub(crate) fn sql_parameters(sql: &str) -> Result<Vec<SqlParameter>, FbError> {
+pub fn sql_parameters(sql: &str) -> Result<Vec<SqlParameter>, FbError> {
     let bytes = sql.as_bytes();
     let mut i = 0;
     let mut result = Vec::new();

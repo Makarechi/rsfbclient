@@ -178,7 +178,7 @@ impl ParamBuffer {
                 })),
             ),
             SqlType::Text(s) => {
-                let bytes = if s.len() > MAX_TEXT_LENGTH {
+                let bytes = if rsfbclient_core::requires_text_blob(&s) {
                     // Match sql_type_and_subtype's decision before encoding.
                     // A text BLOB's sqlscale is its source character set.
                     var.sqlscale = 4; // UTF8

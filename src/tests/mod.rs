@@ -131,3 +131,5 @@ mod services;
 mod transaction;
 
 mod cancellation;
+
+mod prepared_metadata;

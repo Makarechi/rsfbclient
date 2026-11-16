@@ -810,8 +810,59 @@ impl<T: LinkageMarker> FirebirdClientSqlOps for NativeFbClient<T> {
             .collect()
     }
 
+    fn describe_output_columns(
+        &mut self,
+        statement: &mut Self::StmtHandle,
+    ) -> Result<Vec<rsfbclient_core::PreparedOutputColumn>, FbError> {
+        let count = statement.col_buffers.len();
+        let names = self.full_column_names(&mut statement.handle, count, true)?;
+        Ok(names
+            .into_iter()
+            .map(|names| rsfbclient_core::PreparedOutputColumn {
+                alias: names.alias.unwrap_or_default(),
+                relation: names.relation.unwrap_or_default(),
+                field: names.field.unwrap_or_default(),
+            })
+            .collect())
+    }
+
     fn encode_text(&self, value: &str) -> Result<Vec<u8>, FbError> {
         self.charset.encode(value).map(|v| v.into_owned())
+    }
+
+    fn parameter_types(
+        &mut self,
+        stmt_handle: &mut Self::StmtHandle,
+    ) -> Result<Vec<rsfbclient_core::ParameterType>, FbError> {
+        let mut input = XSqlDa::new(1);
+        let mut describe = |input: &mut XSqlDa, status: &mut Status| unsafe {
+            self.ibase.isc_dsql_describe_bind()(
+                &mut status[0],
+                &mut stmt_handle.handle,
+                1,
+                &mut **input,
+            )
+        };
+        if describe(&mut input, &mut self.status) != 0 {
+            return Err(self.status.as_error(&self.ibase));
+        }
+        if input.sqld > input.sqln {
+            input = XSqlDa::new(input.sqld);
+            if describe(&mut input, &mut self.status) != 0 {
+                return Err(self.status.as_error(&self.ibase));
+            }
+        }
+        (0..input.sqld as usize)
+            .map(|i| {
+                input
+                    .get_xsqlvar_mut(i)
+                    .map(|v| rsfbclient_core::ParameterType {
+                        sql_type: (v.sqltype as u32) & !1,
+                        sub_type: v.sqlsubtype as u16,
+                    })
+                    .ok_or_else(|| FbError::from("Incomplete prepared input metadata"))
+            })
+            .collect()
     }
 
     fn free_statement(

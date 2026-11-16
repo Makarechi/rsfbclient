@@ -8,13 +8,19 @@ pub use SqlType::*;
 /// Max length that can be sent without creating a BLOB
 pub const MAX_TEXT_LENGTH: usize = 32767;
 
+/// UTF8 input messages reserve four bytes per character. Larger strings use
+/// an explicitly UTF8 text BLOB, regardless of the attachment encoding.
+pub fn requires_text_blob(value: &str) -> bool {
+    value.len() > 8191 && value.chars().nth(8191).is_some()
+}
+
 impl SqlType {
     /// Convert the sql value to interbase format
     pub fn sql_type_and_subtype(&self) -> (u32, u32) {
         match self {
             Array(_) => (ibase::SQL_ARRAY + 1, 0),
             Text(s) => {
-                if s.len() > MAX_TEXT_LENGTH {
+                if requires_text_blob(s) {
                     (ibase::SQL_BLOB + 1, 1)
                 } else {
                     (ibase::SQL_TEXT + 1, 0)

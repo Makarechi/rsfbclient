@@ -1,6 +1,7 @@
 //! `FirebirdConnection` implementation for the pure rust firebird client
 
 use bytes::{BufMut, Bytes, BytesMut};
+use rsfbclient_core::ParameterType;
 use std::{
     collections::VecDeque,
     env,
@@ -512,6 +513,21 @@ impl FirebirdClientSqlOps for RustFbClient {
             .collect()
     }
 
+    fn describe_output_columns(
+        &mut self,
+        statement: &mut Self::StmtHandle,
+    ) -> Result<Vec<rsfbclient_core::PreparedOutputColumn>, FbError> {
+        Ok(statement
+            .xsqlda
+            .iter()
+            .map(|column| rsfbclient_core::PreparedOutputColumn {
+                alias: column.alias_name.to_string(),
+                relation: column.relation_name.clone(),
+                field: column.field_name.clone(),
+            })
+            .collect())
+    }
+
     fn encode_text(&self, value: &str) -> Result<Vec<u8>, FbError> {
         self.conn
             .as_ref()
@@ -519,6 +535,16 @@ impl FirebirdClientSqlOps for RustFbClient {
             .charset
             .encode(value)
             .map(|v| v.into_owned())
+    }
+
+    fn parameter_types(
+        &mut self,
+        stmt_handle: &mut Self::StmtHandle,
+    ) -> Result<Vec<ParameterType>, FbError> {
+        self.conn
+            .as_mut()
+            .map(|conn| conn.parameter_types(stmt_handle))
+            .unwrap_or_else(err_client_not_connected)
     }
 
     fn free_statement(
@@ -1184,6 +1210,66 @@ impl FirebirdWireConnection {
                 has_blob,
             },
         ))
+    }
+
+    /// Read input types lazily; ordinary short-parameter executions add no I/O.
+    pub fn parameter_types(
+        &mut self,
+        stmt: &mut StmtHandleData,
+    ) -> Result<Vec<ParameterType>, FbError> {
+        let mut vars = Vec::new();
+        loop {
+            let start = u16::try_from(vars.len() + 1)
+                .map_err(|_| FbError::from("Too many input parameters"))?
+                .to_le_bytes();
+            let items = [
+                ibase::isc_info_sql_sqlda_start as u8,
+                2,
+                start[0],
+                start[1],
+                ibase::isc_info_sql_bind as u8,
+                ibase::isc_info_sql_describe_vars as u8,
+                ibase::isc_info_sql_sqlda_seq as u8,
+                ibase::isc_info_sql_type as u8,
+                ibase::isc_info_sql_sub_type as u8,
+                ibase::isc_info_sql_describe_end as u8,
+            ];
+            self.socket.write_all(&info_sql(stmt.handle.0, &items))?;
+            self.socket.flush()?;
+            let mut data = self.read_response()?.data;
+            if data.remaining() < 8
+                || data[0] != ibase::isc_info_sql_bind as u8
+                || data[1] != ibase::isc_info_sql_describe_vars as u8
+            {
+                return Err("Invalid prepared input metadata".into());
+            }
+            data.advance(4)?;
+            let count = data.get_u32_le()? as usize;
+            if count != stmt.param_count {
+                return Err("Prepared input metadata count changed".into());
+            }
+            let before = vars.len();
+            let truncated = crate::xsqlda::parse_select_items_with_charset(
+                &mut data,
+                &mut vars,
+                &self.charset,
+            )?;
+            if !truncated {
+                if vars.len() != count {
+                    return Err("Incomplete prepared input metadata".into());
+                }
+                return Ok(vars
+                    .iter()
+                    .map(|v| ParameterType {
+                        sql_type: (v.sqltype as u32) & !1,
+                        sub_type: v.sqlsubtype as u16,
+                    })
+                    .collect());
+            }
+            if vars.len() <= before {
+                return Err("Prepared input metadata made no progress".into());
+            }
+        }
     }
 
     /// Closes or drops a statement

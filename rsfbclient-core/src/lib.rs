@@ -10,7 +10,8 @@ pub(crate) mod error;
 pub mod ibase;
 mod params;
 mod row;
-mod sql_params;
+#[doc(hidden)]
+pub mod sql_params;
 mod transaction;
 
 pub use array::*;

@@ -720,6 +720,47 @@ mk_tests_default! {
 }
 
 impl SimpleConnection {
+    /// Prepare and cache the statement without executing it.
+    pub fn prepare_statement_type(
+        &mut self,
+        sql: &str,
+    ) -> Result<rsfbclient_core::StmtType, FbError> {
+        match &mut self.inner {
+            #[cfg(feature = "linking")]
+            TypeConnectionContainer::NativeDynLink(c) => c.prepare_statement_type(sql),
+            #[cfg(feature = "dynamic_loading")]
+            TypeConnectionContainer::NativeDynLoad(c) => c.prepare_statement_type(sql),
+            #[cfg(feature = "pure_rust")]
+            TypeConnectionContainer::PureRust(c) => c.prepare_statement_type(sql),
+        }
+    }
+
+    pub fn describe_query_columns(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<rsfbclient_core::PreparedOutputColumn>, FbError> {
+        match &mut self.inner {
+            #[cfg(feature = "linking")]
+            TypeConnectionContainer::NativeDynLink(c) => c.describe_query_columns(sql),
+            #[cfg(feature = "dynamic_loading")]
+            TypeConnectionContainer::NativeDynLoad(c) => c.describe_query_columns(sql),
+            #[cfg(feature = "pure_rust")]
+            TypeConnectionContainer::PureRust(c) => c.describe_query_columns(sql),
+        }
+    }
+
+    /// Time spent preparing a statement for the most recent operation.
+    pub fn last_prepare_duration(&self) -> std::time::Duration {
+        match &self.inner {
+            #[cfg(feature = "linking")]
+            TypeConnectionContainer::NativeDynLink(c) => c.last_prepare_duration,
+            #[cfg(feature = "dynamic_loading")]
+            TypeConnectionContainer::NativeDynLoad(c) => c.last_prepare_duration,
+            #[cfg(feature = "pure_rust")]
+            TypeConnectionContainer::PureRust(c) => c.last_prepare_duration,
+        }
+    }
+
     /// Read prepared aliases and stream a query, including empty results.
     pub fn query_iter_with_columns<'a, P, R>(
         &'a mut self,

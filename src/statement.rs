@@ -12,6 +12,8 @@ use rsfbclient_core::{
     Column, FbError, FirebirdClient, FreeStmtOp, FromRow, IntoParams, NamedParams, StmtType,
 };
 
+mod text_params;
+
 pub struct Statement<'c, 't, C: FirebirdClient> {
     pub(crate) data: StatementData<C>,
     pub(crate) tr: &'t mut Transaction<'c, C>,
@@ -120,6 +122,8 @@ pub struct StatementData<C: FirebirdClient> {
     pub(crate) handle: C::StmtHandle,
     pub(crate) stmt_type: StmtType,
     named_params: NamedParams,
+    blob_params: Vec<usize>,
+    input_types: Option<Vec<rsfbclient_core::ParameterType>>,
 }
 
 impl<C: FirebirdClient> StatementData<C>
@@ -140,15 +144,91 @@ where
         };
         let sql = &named_params.sql;
 
-        let (stmt_type, handle) =
+        let started = std::time::Instant::now();
+        let prepared =
             conn.cli
-                .prepare_statement(&mut conn.handle, &mut tr.handle, conn.dialect, sql)?;
+                .prepare_statement(&mut conn.handle, &mut tr.handle, conn.dialect, sql);
+        conn.last_prepare_duration = started.elapsed();
+        let (stmt_type, handle) = prepared?;
 
         Ok(Self {
             stmt_type,
             handle,
             named_params,
+            blob_params: Vec::new(),
+            input_types: None,
         })
+    }
+
+    /// Change input metadata before execution, never by retrying an executed write.
+    /// Keep the original SQL/cache identity and do not expose values in SQL text.
+    fn input_params<T: IntoParams>(
+        &mut self,
+        conn: &mut Connection<C>,
+        tr: &mut TransactionData<C>,
+        params: T,
+    ) -> Result<Vec<rsfbclient_core::SqlType>, FbError> {
+        let mut params = self.named_params.convert(params)?;
+        let mut indices = text_params::large_text_indices(&params);
+        if !indices.is_empty() {
+            if self.input_types.is_none() {
+                self.input_types = Some(conn.cli.parameter_types(&mut self.handle)?);
+            }
+            let types = self.input_types.as_ref().unwrap();
+            if types.len() != params.len() {
+                return Err("The SQL parameter count does not match the supplied values".into());
+            }
+            for &i in &indices {
+                let kind = types[i];
+                if let rsfbclient_core::SqlType::Text(value) = &params[i] {
+                    let octets = matches!(
+                        kind.sql_type,
+                        rsfbclient_core::ibase::SQL_TEXT | rsfbclient_core::ibase::SQL_VARYING
+                    ) && kind.sub_type == 1;
+                    let binary =
+                        kind.sql_type == rsfbclient_core::ibase::SQL_BLOB && kind.sub_type == 0;
+                    if octets || binary {
+                        let bytes = conn.cli.encode_text(value)?;
+                        params[i] = if octets {
+                            rsfbclient_core::SqlType::Octets(bytes)
+                        } else {
+                            rsfbclient_core::SqlType::Binary(bytes)
+                        };
+                    }
+                }
+            }
+            // Only character input messages have the character-capacity problem.
+            // Numeric/date/boolean inputs must retain the server's coercion;
+            // turning their comparison operand into a BLOB changes semantics.
+            indices.retain(|&i| {
+                matches!(
+                    types[i].sql_type,
+                    rsfbclient_core::ibase::SQL_TEXT | rsfbclient_core::ibase::SQL_VARYING
+                ) && types[i].sub_type != 1
+            });
+            // EXECUTE BLOCK declares its input types explicitly. Its '= ?' slots
+            // cannot contain expressions, and widening declarations changes PSQL.
+            if text_params::is_execute_block(&self.named_params.sql) {
+                indices.clear();
+            }
+        }
+        if indices != self.blob_params {
+            let sql = text_params::prepare_sql(&self.named_params.sql, &indices, params.len())?;
+            let started = std::time::Instant::now();
+            let prepared =
+                conn.cli
+                    .prepare_statement(&mut conn.handle, &mut tr.handle, conn.dialect, &sql);
+            conn.last_prepare_duration += started.elapsed();
+            let (kind, mut handle) = prepared?;
+            if let Err(error) = conn.cli.free_statement(&mut self.handle, FreeStmtOp::Drop) {
+                let _ = conn.cli.free_statement(&mut handle, FreeStmtOp::Drop);
+                return Err(error);
+            }
+            self.handle = handle;
+            self.stmt_type = kind;
+            self.blob_params = indices;
+        }
+        Ok(params)
     }
 
     /// Execute the current statement without returnig any row
@@ -163,12 +243,10 @@ where
     where
         T: IntoParams,
     {
-        let rows_count = conn.cli.execute(
-            &mut conn.handle,
-            &mut tr.handle,
-            &mut self.handle,
-            self.named_params.convert(params)?,
-        )?;
+        let params = self.input_params(conn, tr, params)?;
+        let rows_count =
+            conn.cli
+                .execute(&mut conn.handle, &mut tr.handle, &mut self.handle, params)?;
 
         if self.stmt_type == StmtType::Select {
             // Close the cursor, as it will not be used
@@ -190,12 +268,9 @@ where
     where
         T: IntoParams,
     {
-        conn.cli.execute2(
-            &mut conn.handle,
-            &mut tr.handle,
-            &mut self.handle,
-            self.named_params.convert(params)?,
-        )
+        let params = self.input_params(conn, tr, params)?;
+        conn.cli
+            .execute2(&mut conn.handle, &mut tr.handle, &mut self.handle, params)
     }
 
     /// Open the current statement's result cursor.
@@ -210,12 +285,9 @@ where
     where
         T: IntoParams,
     {
-        conn.cli.execute_cursor(
-            &mut conn.handle,
-            &mut tr.handle,
-            &mut self.handle,
-            self.named_params.convert(params)?,
-        )
+        let params = self.input_params(conn, tr, params)?;
+        conn.cli
+            .execute_cursor(&mut conn.handle, &mut tr.handle, &mut self.handle, params)
     }
 
     /// Fetch for the next row, needs to be called after `query`
