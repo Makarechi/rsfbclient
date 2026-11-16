@@ -13,7 +13,9 @@ use crate::{
     util::*,
     xsqlda::{XSqlVar, XSQLDA_DESCRIBE_VARS},
 };
-use rsfbclient_core::{ibase, Charset, Column, Dialect, FbError, FreeStmtOp, SqlType, TrOp};
+use rsfbclient_core::{
+    charset::OCTETS_CHARSET_ID, ibase, Charset, Column, Dialect, FbError, FreeStmtOp, SqlType, TrOp,
+};
 
 /// Buffer length to use in the connection
 pub const BUFFER_LENGTH: u32 = 1024;
@@ -493,10 +495,14 @@ pub fn prepare_statement(
 
 /// Statement information request
 pub fn info_sql(stmt_handle: u32, requested_items: &[u8]) -> Bytes {
+    info_request(WireOp::InfoSql, stmt_handle, requested_items)
+}
+
+pub(crate) fn info_request(op: WireOp, handle: u32, requested_items: &[u8]) -> Bytes {
     let mut req = BytesMut::with_capacity(24 + requested_items.len());
 
-    req.put_u32(WireOp::InfoSql as u32);
-    req.put_u32(stmt_handle);
+    req.put_u32(op as u32);
+    req.put_u32(handle);
     req.put_u32(0); // Incarnation of object
     req.put_wire_bytes(requested_items);
     req.put_u32(INFO_BUFFER_LENGTH);
@@ -1105,8 +1111,12 @@ impl RowSink for ParsedColumnSink<'_> {
     }
 
     fn text(&mut self, var: &XSqlVar, sqltype: u32, data: Bytes) -> Result<(), FbError> {
-        let text = self.charset.decode(&data[..])?;
-        self.push(var, sqltype, SqlType::Text(text));
+        let value = if var.sqlsubtype as u16 == OCTETS_CHARSET_ID {
+            SqlType::Octets(data.to_vec())
+        } else {
+            SqlType::Text(self.charset.decode(&data[..])?)
+        };
+        self.push(var, sqltype, value);
         Ok(())
     }
 
@@ -1188,8 +1198,12 @@ impl RowSink for ColumnSink<'_> {
     }
 
     fn text(&mut self, var: &XSqlVar, sqltype: u32, data: Bytes) -> Result<(), FbError> {
-        let text = self.charset.decode(&data[..])?;
-        self.push(var, sqltype, SqlType::Text(text));
+        let value = if var.sqlsubtype as u16 == OCTETS_CHARSET_ID {
+            SqlType::Octets(data.to_vec())
+        } else {
+            SqlType::Text(self.charset.decode(&data[..])?)
+        };
+        self.push(var, sqltype, value);
         Ok(())
     }
 
@@ -1244,8 +1258,13 @@ impl RowSink for RawSink<'_> {
         Ok(())
     }
 
-    fn text(&mut self, _var: &XSqlVar, _sqltype: u32, data: Bytes) -> Result<(), FbError> {
-        self.out.push(RawValue::Text(data));
+    fn text(&mut self, var: &XSqlVar, _sqltype: u32, data: Bytes) -> Result<(), FbError> {
+        self.out
+            .push(if var.sqlsubtype as u16 == OCTETS_CHARSET_ID {
+                RawValue::Octets(data)
+            } else {
+                RawValue::Text(data)
+            });
         Ok(())
     }
 
