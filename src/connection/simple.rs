@@ -416,6 +416,18 @@ impl SimpleConnection {
         }
     }
 
+    /// Report a deferred page error without fetching again.
+    pub fn check_paged_query_error(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
+        match &mut self.inner {
+            #[cfg(feature = "linking")]
+            TypeConnectionContainer::NativeDynLink(c) => c.check_paged_query_error(cursor),
+            #[cfg(feature = "dynamic_loading")]
+            TypeConnectionContainer::NativeDynLoad(c) => c.check_paged_query_error(cursor),
+            #[cfg(feature = "pure_rust")]
+            TypeConnectionContainer::PureRust(c) => c.check_paged_query_error(cursor),
+        }
+    }
+
     /// Close the retained SELECT cursor.
     pub fn close_paged_query(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
         match &mut self.inner {

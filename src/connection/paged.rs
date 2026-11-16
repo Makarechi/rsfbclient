@@ -140,6 +140,19 @@ impl<C: FirebirdClient> Connection<C> {
         }
     }
 
+    /// Report a fetch error deferred by the last page, without fetching again.
+    ///
+    /// A command that was cancelled can use this to report its actual outcome
+    /// immediately. Any pending row is left in the cursor for the next page.
+    pub fn check_paged_query_error(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
+        self.paged_statement_index(cursor)?;
+        if let Some(Err(error)) = cursor.pending.take_if(|result| result.is_err()) {
+            self.close_paged_query(cursor).ok();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Close this cursor and free its prepared statement.
     pub fn close_paged_query(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
         let index = self.paged_statement_index(cursor)?;
