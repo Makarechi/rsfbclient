@@ -116,6 +116,9 @@ mod arrays;
 mod charset;
 mod connection;
 mod cursor;
+
+mod error_diagnostics;
+
 mod database;
 mod octet_strings;
 mod params;
