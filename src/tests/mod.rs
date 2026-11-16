@@ -137,3 +137,5 @@ mod extended_scalars;
 mod prepare_timing;
 
 mod text_blob;
+
+mod statement_description;

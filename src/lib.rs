@@ -191,8 +191,9 @@ pub use crate::{
     utils::{EngineVersion, SystemInfos},
 };
 pub use rsfbclient_core::{
-    Column, ColumnToVal, Dialect, ExternalPsqlContext, FbError, FromRow, IntoParam, IntoParams,
-    ParamsType, Row, SqlDiagnostics, SqlType,
+    Column, ColumnDesc, ColumnToVal, Dialect, ExternalPsqlContext, FbError, FromRow, IntoParam,
+    IntoParams, ParameterDesc, ParamsType, Row, SqlDiagnostics, SqlType, StatementDescription,
+    StmtType,
 };
 
 #[doc(hidden)]
