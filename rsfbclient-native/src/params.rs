@@ -177,6 +177,12 @@ impl ParamBuffer {
                     gds_quad_low: id.low,
                 })),
             ),
+            SqlType::TextBlob(s) => {
+                var.sqlscale = 4;
+                let bytes = binary_to_blob(s.as_bytes(), db, tr, ibase)?;
+                (bytes.len(), Text(bytes.into_boxed_slice()))
+            }
+
             SqlType::Text(s) => {
                 let bytes = if s.len() > MAX_TEXT_LENGTH {
                     // Match sql_type_and_subtype's decision before encoding.

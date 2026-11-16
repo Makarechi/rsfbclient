@@ -13,6 +13,7 @@ impl SqlType {
     pub fn sql_type_and_subtype(&self) -> (u32, u32) {
         match self {
             Array(_) => (ibase::SQL_ARRAY + 1, 0),
+            TextBlob(_) => (ibase::SQL_BLOB + 1, 1),
             Text(s) => {
                 if s.len() > MAX_TEXT_LENGTH {
                     (ibase::SQL_BLOB + 1, 1)
