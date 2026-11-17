@@ -3,7 +3,7 @@
 //! multiple connection types/variations.
 //!
 
-use crate::{Connection, Execute, FbError, FromRow, IntoParams, Queryable};
+use crate::{Connection, Execute, FbError, FromRow, IntoParams, PagedQuery, Queryable};
 use rsfbclient_core::{StmtType, TransactionConfiguration};
 
 #[cfg(feature = "linking")]
@@ -809,7 +809,7 @@ impl SimpleConnection {
         &mut self,
         sql: &str,
         params: Vec<crate::SqlType>,
-    ) -> Result<Vec<String>, FbError> {
+    ) -> Result<PagedQuery, FbError> {
         match &mut self.inner {
             #[cfg(feature = "linking")]
             TypeConnectionContainer::NativeDynLink(c) => c.open_paged_query(sql, params),
@@ -821,38 +821,42 @@ impl SimpleConnection {
     }
 
     /// Fetch new rows from the retained SELECT, without executing it again.
-    pub fn fetch_query_page(&mut self, limit: usize) -> Result<(Vec<crate::Row>, bool), FbError> {
+    pub fn fetch_query_page(
+        &mut self,
+        cursor: &mut PagedQuery,
+        limit: usize,
+    ) -> Result<(Vec<crate::Row>, bool), FbError> {
         match &mut self.inner {
             #[cfg(feature = "linking")]
-            TypeConnectionContainer::NativeDynLink(c) => c.fetch_query_page(limit),
+            TypeConnectionContainer::NativeDynLink(c) => c.fetch_query_page(cursor, limit),
             #[cfg(feature = "dynamic_loading")]
-            TypeConnectionContainer::NativeDynLoad(c) => c.fetch_query_page(limit),
+            TypeConnectionContainer::NativeDynLoad(c) => c.fetch_query_page(cursor, limit),
             #[cfg(feature = "pure_rust")]
-            TypeConnectionContainer::PureRust(c) => c.fetch_query_page(limit),
+            TypeConnectionContainer::PureRust(c) => c.fetch_query_page(cursor, limit),
         }
     }
 
     /// Report a deferred page error without fetching again.
-    pub fn check_paged_query_error(&mut self) -> Result<(), FbError> {
+    pub fn check_paged_query_error(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
         match &mut self.inner {
             #[cfg(feature = "linking")]
-            TypeConnectionContainer::NativeDynLink(c) => c.check_paged_query_error(),
+            TypeConnectionContainer::NativeDynLink(c) => c.check_paged_query_error(cursor),
             #[cfg(feature = "dynamic_loading")]
-            TypeConnectionContainer::NativeDynLoad(c) => c.check_paged_query_error(),
+            TypeConnectionContainer::NativeDynLoad(c) => c.check_paged_query_error(cursor),
             #[cfg(feature = "pure_rust")]
-            TypeConnectionContainer::PureRust(c) => c.check_paged_query_error(),
+            TypeConnectionContainer::PureRust(c) => c.check_paged_query_error(cursor),
         }
     }
 
     /// Close the retained SELECT cursor.
-    pub fn close_paged_query(&mut self) -> Result<(), FbError> {
+    pub fn close_paged_query(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
         match &mut self.inner {
             #[cfg(feature = "linking")]
-            TypeConnectionContainer::NativeDynLink(c) => c.close_paged_query(),
+            TypeConnectionContainer::NativeDynLink(c) => c.close_paged_query(cursor),
             #[cfg(feature = "dynamic_loading")]
-            TypeConnectionContainer::NativeDynLoad(c) => c.close_paged_query(),
+            TypeConnectionContainer::NativeDynLoad(c) => c.close_paged_query(cursor),
             #[cfg(feature = "pure_rust")]
-            TypeConnectionContainer::PureRust(c) => c.close_paged_query(),
+            TypeConnectionContainer::PureRust(c) => c.close_paged_query(cursor),
         }
     }
 }
