@@ -44,7 +44,7 @@ pub(crate) mod simple;
 pub use simple::{ArrayReadContext, QueryCursor, SimpleConnection};
 
 mod paged;
-pub use paged::PagedQuery;
+pub use paged::{PagedQuery, PausedPagedQuery};
 
 /// A generic factory for creating multiple preconfigured instances of a particular client implementation
 /// Intended mainly for use by connection pool

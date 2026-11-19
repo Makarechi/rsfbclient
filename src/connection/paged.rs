@@ -3,25 +3,93 @@ use super::{Connection, FbError, FirebirdClient, StatementData};
 use rsfbclient_core::{Row, SqlType, StmtType};
 use std::sync::{Arc, Weak};
 
-/// A paged SELECT in the connection and transaction that opened it.
+/// A SELECT cursor that borrows the connection for consecutive page reads.
 ///
-/// Pass this cursor to the corresponding connection to fetch or close it.
-/// Several cursors may be open in the same transaction. Ending the transaction
-/// or disconnecting invalidates them all. Dropping a cursor without closing
-/// it releases its statement on the next paged open or at transaction end.
-#[must_use = "pass the cursor to fetch_query_page or close_paged_query"]
-pub struct PagedQuery {
+/// The statement is closed when the cursor is dropped or explicitly closed.
+/// Use [`Self::pause`] to release the borrow while keeping the cursor open.
+#[must_use = "dropping the cursor closes its statement"]
+pub struct PagedQuery<'a> {
+    connection: &'a mut dyn PageConnection,
+    state: Option<PausedPagedQuery>,
+}
+
+impl<'a> PagedQuery<'a> {
+    pub(super) fn new(connection: &'a mut dyn PageConnection, state: PausedPagedQuery) -> Self {
+        Self {
+            connection,
+            state: Some(state),
+        }
+    }
+
+    /// Prepared output column names, including for an empty result.
+    pub fn columns(&self) -> &[String] {
+        &self.state.as_ref().unwrap().columns
+    }
+
+    /// Fetch up to `limit` rows without re-executing the SELECT.
+    ///
+    /// The flag indicates that another call can return a row or a pending error.
+    /// A terminal fetch error is returned after any rows already collected.
+    pub fn fetch(&mut self, limit: usize) -> Result<(Vec<Row>, bool), FbError> {
+        self.connection
+            .fetch_page(self.state.as_mut().unwrap(), limit)
+    }
+
+    /// Report a fetch error deferred by the last page, without fetching again.
+    ///
+    /// Use this after a cancellation request to report the actual outcome.
+    /// If a row is pending instead, it is left for the next page.
+    pub fn check_error(&mut self) -> Result<(), FbError> {
+        self.connection.check_page(self.state.as_mut().unwrap())
+    }
+
+    /// Release the connection borrow without closing the statement.
+    ///
+    /// Resume the cursor on the same connection before ending its transaction.
+    pub fn pause(mut self) -> PausedPagedQuery {
+        self.state.take().unwrap()
+    }
+
+    /// Close the cursor and release its prepared statement.
+    pub fn close(mut self) -> Result<(), FbError> {
+        self.close_statement()
+    }
+
+    fn close_statement(&mut self) -> Result<(), FbError> {
+        self.state
+            .take()
+            .map_or(Ok(()), |mut state| self.connection.close_page(&mut state))
+    }
+}
+
+impl Drop for PagedQuery<'_> {
+    fn drop(&mut self) {
+        let _ = self.close_statement();
+    }
+}
+
+/// A paused SELECT cursor that can be resumed on its original connection.
+///
+/// A commit, rollback or disconnect invalidates it. If the token is dropped
+/// without resuming it, the statement is released on the next paged open or
+/// at transaction end.
+#[must_use = "resume this cursor on its original connection"]
+pub struct PausedPagedQuery {
     id: Arc<()>,
     columns: Vec<String>,
     pending: Option<Result<Row, FbError>>,
     exhausted: bool,
 }
 
-impl PagedQuery {
-    /// Prepared output column names, including for an empty result.
-    pub fn columns(&self) -> &[String] {
-        &self.columns
-    }
+pub(super) trait PageConnection: Send {
+    fn start_page(&mut self, sql: &str, params: Vec<SqlType>) -> Result<PausedPagedQuery, FbError>;
+    fn fetch_page(
+        &mut self,
+        cursor: &mut PausedPagedQuery,
+        limit: usize,
+    ) -> Result<(Vec<Row>, bool), FbError>;
+    fn check_page(&mut self, cursor: &mut PausedPagedQuery) -> Result<(), FbError>;
+    fn close_page(&mut self, cursor: &mut PausedPagedQuery) -> Result<(), FbError>;
 }
 
 // Keep only handles that the connection must release, even if a caller drops
@@ -33,11 +101,26 @@ pub(super) struct PagedStatement<C: FirebirdClient> {
 
 impl<C: FirebirdClient> Connection<C> {
     /// Open a SELECT cursor in the explicitly active default transaction.
-    pub fn open_paged_query(
+    pub fn query_paged(
         &mut self,
         sql: &str,
         params: Vec<SqlType>,
-    ) -> Result<PagedQuery, FbError> {
+    ) -> Result<PagedQuery<'_>, FbError> {
+        let state = self.start_page(sql, params)?;
+        Ok(self.resume_paged_query(state))
+    }
+
+    /// Resume a cursor paused on this connection.
+    ///
+    /// Fetching a cursor from a different connection or an ended transaction
+    /// reports that the cursor is closed.
+    pub fn resume_paged_query(&mut self, cursor: PausedPagedQuery) -> PagedQuery<'_> {
+        PagedQuery::new(self, cursor)
+    }
+}
+
+impl<C: FirebirdClient> PageConnection for Connection<C> {
+    fn start_page(&mut self, sql: &str, params: Vec<SqlType>) -> Result<PausedPagedQuery, FbError> {
         if !self.in_transaction {
             return Err("Paged queries require an explicitly active transaction".into());
         }
@@ -65,7 +148,7 @@ impl<C: FirebirdClient> Connection<C> {
             id: Arc::downgrade(&id),
             statement,
         });
-        Ok(PagedQuery {
+        Ok(PausedPagedQuery {
             id,
             columns,
             pending: None,
@@ -73,13 +156,9 @@ impl<C: FirebirdClient> Connection<C> {
         })
     }
 
-    /// Fetch at most `limit` new rows; retain one lookahead row for the next call.
-    /// The flag indicates that another call can return a row or a pending error.
-    /// A terminal fetch error is returned after any rows already collected.
-    /// Reporting the error releases the cursor without re-executing its SELECT.
-    pub fn fetch_query_page(
+    fn fetch_page(
         &mut self,
-        cursor: &mut PagedQuery,
+        cursor: &mut PausedPagedQuery,
         limit: usize,
     ) -> Result<(Vec<Row>, bool), FbError> {
         if limit == 0 {
@@ -140,21 +219,16 @@ impl<C: FirebirdClient> Connection<C> {
         }
     }
 
-    /// Report a fetch error deferred by the last page, without fetching again.
-    ///
-    /// A command that was cancelled can use this to report its actual outcome
-    /// immediately. Any pending row is left in the cursor for the next page.
-    pub fn check_paged_query_error(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
+    fn check_page(&mut self, cursor: &mut PausedPagedQuery) -> Result<(), FbError> {
         self.paged_statement_index(cursor)?;
         if let Some(Err(error)) = cursor.pending.take_if(|result| result.is_err()) {
-            self.close_paged_query(cursor).ok();
+            self.close_page(cursor).ok();
             return Err(error);
         }
         Ok(())
     }
 
-    /// Close this cursor and free its prepared statement.
-    pub fn close_paged_query(&mut self, cursor: &mut PagedQuery) -> Result<(), FbError> {
+    fn close_page(&mut self, cursor: &mut PausedPagedQuery) -> Result<(), FbError> {
         let index = self.paged_statement_index(cursor)?;
         cursor.exhausted = true;
         cursor.pending = None;
@@ -163,8 +237,10 @@ impl<C: FirebirdClient> Connection<C> {
             .statement
             .close(self)
     }
+}
 
-    fn paged_statement_index(&self, cursor: &PagedQuery) -> Result<usize, FbError> {
+impl<C: FirebirdClient> Connection<C> {
+    fn paged_statement_index(&self, cursor: &PausedPagedQuery) -> Result<usize, FbError> {
         self.paged_statements
             .iter()
             .position(|entry| entry.id.as_ptr() == Arc::as_ptr(&cursor.id))
